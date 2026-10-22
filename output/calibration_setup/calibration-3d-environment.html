@@ -1,0 +1,390 @@
+<div id="bev-calibration-3d">
+  <div class="viz-controls">
+    <label class="form-label">Camera
+      <select class="form-select" id="bev-camera">
+        <option value="0">CAM1 · forward, narrow</option><option value="1">CAM2 · forward, wide</option>
+        <option value="2" selected>CAM3 · front-left</option><option value="3">CAM4 · rear-left</option>
+        <option value="4">CAM5 · front-right</option><option value="5">CAM6 · rear-right</option>
+      </select>
+    </label>
+    <label class="form-label">View
+      <select class="form-select" id="bev-view"><option value="setup">Calibration setup</option><option value="site">Whole survey site</option><option value="top">Overhead</option></select>
+    </label>
+    <label class="form-label">Board placement
+      <select class="form-select" id="bev-placement"><option value="0">P1 · near / low</option><option value="1">P2 · intermediate / high</option><option value="2">P3 · farther / low</option><option value="3">P4 · intermediate / tilted</option><option value="4">P5 · far / low</option><option value="5">P6 · far / high</option></select>
+    </label>
+  </div>
+  <div class="bev-stage">
+    <canvas id="bev-scene" role="img" aria-label="Interactive three-dimensional camera calibration site with a six-camera vehicle, surveyed checkerboard, total station, control references, and independent ground targets."></canvas>
+    <canvas id="bev-labels" aria-hidden="true"></canvas>
+    <div id="bev-error" role="alert" hidden></div>
+  </div>
+  <div class="viz-controls">
+    <label class="form-check"><input id="bev-survey" class="form-check-input" type="checkbox" checked><span class="form-check-label">Survey lines</span></label>
+    <label class="form-check"><input id="bev-ground" class="form-check-input" type="checkbox" checked><span class="form-check-label">Ground checks</span></label>
+    <label class="form-check"><input id="bev-ghosts" class="form-check-input" type="checkbox" checked><span class="form-check-label">Other placements</span></label>
+  </div>
+  <div class="viz-row bev-orbit-controls" aria-label="Scene navigation">
+    <button type="button" class="btn" data-orbit="left" aria-label="Orbit left">Orbit left</button>
+    <button type="button" class="btn" data-orbit="right" aria-label="Orbit right">Orbit right</button>
+    <button type="button" class="btn" data-orbit="up" aria-label="Raise viewpoint">Raise view</button>
+    <button type="button" class="btn" data-orbit="down" aria-label="Lower viewpoint">Lower view</button>
+    <button type="button" class="btn" data-orbit="in" aria-label="Zoom in">Zoom +</button>
+    <button type="button" class="btn" data-orbit="out" aria-label="Zoom out">Zoom −</button>
+  </div>
+  <div class="viz-row bev-legend text-small">
+    <span><i class="bev-swatch" style="background:var(--viz-series-1)"></i>Cameras / axes</span>
+    <span><i class="bev-swatch" style="background:var(--viz-series-2)"></i>Fit target</span>
+    <span><i class="bev-swatch" style="background:var(--viz-series-3)"></i>Survey network</span>
+    <span><i class="bev-swatch" style="background:var(--viz-series-4)"></i>Independent checks</span>
+  </div>
+  <div id="bev-detail" class="text-small" aria-live="polite"></div>
+</div>
+<style>
+#bev-calibration-3d .bev-stage{position:relative;width:100%;height:510px;isolation:isolate}
+#bev-calibration-3d canvas{display:block;width:100%;height:100%}
+#bev-calibration-3d #bev-scene{touch-action:none;cursor:grab}
+#bev-calibration-3d #bev-scene:active{cursor:grabbing}
+#bev-calibration-3d #bev-labels{position:absolute;inset:0;pointer-events:none}
+#bev-calibration-3d .bev-orbit-controls{margin-top:8px}
+#bev-calibration-3d .bev-legend{justify-content:flex-start;margin:12px 0 8px;gap:14px}
+#bev-calibration-3d .bev-legend span{display:inline-flex;align-items:center;gap:5px}
+#bev-calibration-3d .bev-swatch{display:inline-block;width:9px;height:9px}
+#bev-calibration-3d #bev-error{position:absolute;left:16px;top:16px;color:var(--destructive)}
+@media(max-width:480px){#bev-calibration-3d .bev-stage{height:430px}}
+</style>
+<script>
+(() => {
+  'use strict';
+  const root=document.getElementById('bev-calibration-3d');
+  const $=id=>root.querySelector('#bev-'+id);
+  const canvas=$('scene'), overlay=$('labels'), ctx=overlay.getContext('2d');
+  let gl=canvas.getContext('webgl',{alpha:false,antialias:true,preserveDrawingBuffer:true});
+  const fallback=gl?null:canvas.getContext('2d');
+  if(!gl&&!fallback){$('error').hidden=false;$('error').textContent='This browser cannot render the 3D scene.';return;}
+  const add=(a,b)=>a.map((v,i)=>v+b[i]), sub=(a,b)=>a.map((v,i)=>v-b[i]);
+  const mul=(a,k)=>a.map(v=>v*k), dot=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  const norm=a=>{const n=Math.hypot(...a);return n>1e-8?mul(a,1/n):[0,0,1];};
+  const mix=(a,b,t)=>a.map((v,i)=>v*(1-t)+b[i]*t);
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const cameras=[
+    {id:'CAM1',name:'forward, narrow',p:[2.4,.13,1.73],yaw:0,fov:'40°'},
+    {id:'CAM2',name:'forward, wide',p:[2.4,-.13,1.73],yaw:0,fov:'110°'},
+    {id:'CAM3',name:'front-left',p:[1.8,1.05,1.63],yaw:Math.PI/4,fov:'70°'},
+    {id:'CAM4',name:'rear-left',p:[1.35,1.05,1.63],yaw:3*Math.PI/4,fov:'70°'},
+    {id:'CAM5',name:'front-right',p:[1.8,-1.05,1.63],yaw:-Math.PI/4,fov:'70°'},
+    {id:'CAM6',name:'rear-right',p:[1.35,-1.05,1.63],yaw:-3*Math.PI/4,fov:'70°'}
+  ];
+  const defaults={cam:2,placement:0,view:'setup',survey:true,ground:true,ghosts:true};
+  const state={...defaults};
+  const orbit={theta:1.03,phi:.65,distance:16,target:[2,2,.7]};
+  let colors, scene, labels=[], matrix, width=736,height=510,scheduled=false;
+  const scratch=document.createElement('canvas');scratch.width=1;scratch.height=1;const palette=scratch.getContext('2d');
+  function token(name){
+    const probe=document.createElement('span');probe.style.color='var('+name+')';root.appendChild(probe);
+    const color=getComputedStyle(probe).color;probe.remove();palette.fillStyle=color;palette.fillRect(0,0,1,1);
+    return [...palette.getImageData(0,0,1,1).data].slice(0,3).map(v=>v/255);
+  }
+  const css=a=>'rgb('+a.map(v=>Math.round(clamp(v,0,1)*255)).join(',')+')';
+  function refreshColors(){
+    const bg=token('--background'), fg=token('--foreground');
+    const dark=dot(bg,[.21,.72,.07])<dot(fg,[.21,.72,.07])?bg:fg;
+    const light=dark===bg?fg:bg;
+    colors={bg,fg,dark,light,muted:token('--muted-foreground'),grid:mix(bg,fg,.13),
+      car:mix(bg,fg,.22),glass:mix(dark,token('--viz-series-1'),.22),rubber:mix(dark,light,.07),
+      cam:token('--viz-series-1'),board:token('--viz-series-2'),survey:token('--viz-series-3'),check:token('--viz-series-4')};
+  }
+  let program,vbo,lineBuffer,locations;
+  function shader(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}
+  if(gl){
+    try{
+      program=gl.createProgram();
+      gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec3 aPosition;attribute vec3 aNormal;attribute vec3 aColor;uniform mat4 uMatrix;uniform float uFlat;varying vec3 vColor;void main(){float d=max(dot(normalize(aNormal),normalize(vec3(-0.3,-0.4,1.0))),0.0);float light=mix(0.67+0.33*d,1.0,uFlat);vColor=aColor*light;gl_Position=uMatrix*vec4(aPosition,1.0);}'));
+      gl.attachShader(program,shader(gl.FRAGMENT_SHADER,'precision mediump float;varying vec3 vColor;void main(){gl_FragColor=vec4(vColor,1.0);}'));
+      gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+      gl.useProgram(program);vbo=gl.createBuffer();lineBuffer=gl.createBuffer();
+      locations={p:gl.getAttribLocation(program,'aPosition'),n:gl.getAttribLocation(program,'aNormal'),c:gl.getAttribLocation(program,'aColor'),m:gl.getUniformLocation(program,'uMatrix'),f:gl.getUniformLocation(program,'uFlat')};
+      gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
+    }catch(error){$('error').hidden=false;$('error').textContent='The 3D renderer could not start: '+error.message;return;}
+  }
+  function triangle(a,b,c,color){const n=norm(cross(sub(b,a),sub(c,a)));for(const p of [a,b,c])scene.tri.push(...p,...n,...color);}
+  function quad(a,b,c,d,color){triangle(a,b,c,color);triangle(a,c,d,color);}
+  function line(a,b,color){scene.lines.push(...a,0,0,1,...color,...b,0,0,1,...color);}
+  function dashed(a,b,color){const n=Math.ceil(Math.hypot(...sub(b,a))/.22);for(let i=0;i<n;i+=2)line(mix(a,b,i/n),mix(a,b,Math.min(1,(i+1)/n)),color);}
+  function box(center,size,color,transform){
+    const pts=[[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]].map(v=>{
+      const p=v.map((x,i)=>x*size[i]/2);return add(center,transform?transform(p):p);
+    });
+    for(const f of [[0,3,2,1],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]])quad(...f.map(i=>pts[i]),color);
+  }
+  function cylinder(a,b,r,color,segments=16){
+    const z=norm(sub(b,a)),seed=Math.abs(z[2])>.9?[0,1,0]:[0,0,1],x=norm(cross(z,seed)),y=cross(z,x);
+    const point=(c,t)=>add(c,mul(add(mul(x,Math.cos(t)),mul(y,Math.sin(t))),r));
+    for(let i=0;i<segments;i++){
+      const t=i*2*Math.PI/segments,u=(i+1)*2*Math.PI/segments,A=point(a,t),B=point(a,u),C=point(b,u),D=point(b,t);
+      quad(A,B,C,D,color);triangle(a,B,A,color);triangle(b,D,C,color);
+    }
+  }
+  function arrow(a,b,color){
+    cylinder(a,b,.018,color,8);const dir=norm(sub(b,a)),x=norm(cross(dir,Math.abs(dir[2])>.9?[0,1,0]:[0,0,1])),y=cross(dir,x),base=add(b,mul(dir,-.16));
+    for(let i=0;i<10;i++){const t=i*2*Math.PI/10,u=(i+1)*2*Math.PI/10;
+      triangle(b,add(base,mul(add(mul(x,Math.cos(t)),mul(y,Math.sin(t))),.075)),add(base,mul(add(mul(x,Math.cos(u)),mul(y,Math.sin(u))),.075)),color);
+    }
+  }
+  function label(p,text,priority=2,offset=[0,-12]){labels.push({p,text,priority,offset});}
+  function ring(r,color){for(let i=0;i<180;i++){const a=i*Math.PI/90,b=(i+1)*Math.PI/90;line([r*Math.cos(a),r*Math.sin(a),.015],[r*Math.cos(b),r*Math.sin(b),.015],color);}}
+  function vehicle(){
+    const C=colors;
+    // A generic vehicle is intentional: no measured body dimensions are provided in the plan.
+    box([1.35,0,.62],[4.7,1.93,.60],C.car);
+    box([1.35,0,.34],[4.35,1.77,.18],mix(C.car,C.dark,.2));
+    box([3.12,0,1.03],[1.15,1.89,.25],C.car);
+    const roof=[[-.38,-.72,1.77],[1.75,-.72,1.77],[1.75,.72,1.77],[-.38,.72,1.77]];
+    const base=[[-.88,-.91,.98],[2.65,-.91,.98],[2.65,.91,.98],[-.88,.91,.98]];
+    quad(...roof,C.car);
+    for(let i=0;i<4;i++)quad(base[i],base[(i+1)%4],roof[(i+1)%4],roof[i],C.car);
+    quad([2.57,-.82,1.02],[2.57,.82,1.02],[1.79,.67,1.72],[1.79,-.67,1.72],C.glass);
+    quad([-.83,.82,1.02],[-.83,-.82,1.02],[-.42,-.67,1.72],[-.42,.67,1.72],C.glass);
+    for(const s of [-1,1]){
+      quad([-.77,s*.918,1.03],[.35,s*.918,1.03],[.35,s*.727,1.70],[-.38,s*.727,1.70],C.glass);
+      quad([.45,s*.918,1.03],[2.51,s*.918,1.03],[1.73,s*.727,1.70],[.45,s*.727,1.70],C.glass);
+      box([1.94,s*1.08,1.15],[.28,.22,.15],C.car);
+      for(const x of [0,2.8]){
+        cylinder([x,s*.88,.38],[x,s*1.12,.38],.38,C.rubber,28);
+        cylinder([x,s*1.12,.38],[x,s*1.135,.38],.21,mix(C.light,C.dark,.35),20);
+        cylinder([x,s*1.137,.38],[x,s*1.142,.38],.075,C.dark,12);
+      }
+      for(const x of [.20,1.72])box([x,s*.969,.88],[.25,.025,.035],mix(C.dark,C.light,.3));
+    }
+    for(const s of [-1,1]){
+      box([3.711,s*.65,.85],[.025,.42,.16],mix(C.light,C.board,.13));
+      box([-.997,s*.66,.82],[.025,.32,.20],mix(C.board,C.dark,.2));
+    }
+    box([3.724,0,.58],[.03,.70,.25],mix(C.dark,C.light,.2));
+    box([-.999,0,.61],[.025,.75,.16],mix(C.dark,C.light,.2));
+    // Ground contact shadows are geometry and remain deterministic without a texture dependency.
+    for(const x of [0,2.8])for(const y of [-1,1]){
+      const color=mix(C.bg,C.dark,.15);for(let j=0;j<24;j++)triangle([x,y,.008],[x+.56*Math.cos(j*Math.PI/12),y+.35*Math.sin(j*Math.PI/12),.008],[x+.56*Math.cos((j+1)*Math.PI/12),y+.35*Math.sin((j+1)*Math.PI/12),.008],color);
+    }
+    cameras.forEach((cam,i)=>{
+      const forward=[Math.cos(cam.yaw),Math.sin(cam.yaw),-.12],right=[-Math.sin(cam.yaw),Math.cos(cam.yaw),0];
+      const transform=p=>add(add(mul(forward,p[0]),mul(right,p[1])),[0,0,p[2]]);
+      box(cam.p,[.16,.14,.12],i===state.cam?C.cam:mix(C.car,C.cam,.3),transform);
+      cylinder(add(cam.p,mul(forward,.075)),add(cam.p,mul(forward,.19)),.047,C.dark,12);
+      cylinder(add(cam.p,mul(forward,.19)),add(cam.p,mul(forward,.20)),.035,C.cam,12);
+      if(i===state.cam){arrow(add(cam.p,mul(forward,.23)),add(cam.p,mul(forward,.95)),C.cam);label(add(cam.p,[0,0,.27]),cam.id+' · '+cam.name,0,[0,-16]);}
+      else if(state.view!=='setup')label(add(cam.p,[0,0,.12]),cam.id,6,[0,-12]);
+    });
+  }
+  function boardPlacement(index){
+    const cam=cameras[state.cam],d=[2.0,3.2,4.7,3.6,5.8,7.3][index],side=[-.35,.55,-.6,.7,-.7,.3][index];
+    const f=[Math.cos(cam.yaw),Math.sin(cam.yaw),0],r=[-Math.sin(cam.yaw),Math.cos(cam.yaw),0];
+    const center=add(cam.p,add(mul(f,d),mul(r,side)));center[2]=[1.1,1.8,1.35,2.3,1.25,1.9][index];
+    const normal=norm(sub(cam.p,center)),right=norm(cross([0,0,1],normal)),up=norm(cross(normal,right));
+    const tilt=[-.08,.16,-.19,.27,-.12,.15][index],roll=[.03,-.12,.1,-.16,.09,-.04][index];
+    const u=add(mul(right,Math.cos(roll)),mul(up,Math.sin(roll))),v=add(mul(up,Math.cos(roll)),mul(right,-Math.sin(roll)));
+    return {center,u,v:add(mul(v,Math.cos(tilt)),mul(normal,Math.sin(tilt))),n:add(mul(normal,Math.cos(tilt)),mul(v,-Math.sin(tilt)))};
+  }
+  function board(index,active){
+    const b=boardPlacement(index),C=colors,s=.12,w=8*s,h=11*s;
+    const local=(x,y,z=0)=>add(b.center,add(add(mul(b.u,x),mul(b.v,y)),mul(b.n,z)));
+    const tint=color=>active?color:mix(C.bg,color,.48);
+    box(b.center,[w+.13,.045,h+.13],tint(mix(C.car,C.light,.3)),p=>add(add(mul(b.u,p[0]),mul(b.n,p[1])),mul(b.v,p[2])));
+    for(const face of [1]){
+      for(let row=0;row<11;row++)for(let col=0;col<8;col++){
+        const x=-w/2+col*s,y=h/2-row*s,z=face*.025;
+        const color=tint((row+col)%2===0?C.dark:C.light);
+        quad(local(x,y,z),local(x+s,y,z),local(x+s,y-s,z),local(x,y-s,z),color);
+      }
+    }
+    const bottom=add(b.center,[0,0,-h/2-.05]);const base=[b.center[0],b.center[1],.055];
+    cylinder(base,bottom,.021,tint(C.muted),10);
+    cylinder(add(base,mul(b.u,-.32)),add(base,mul(b.u,.32)),.025,tint(C.muted),10);
+    cylinder(add(base,mul(b.n,-.25)),add(base,mul(b.n,.25)),.025,tint(C.muted),10);
+    if(active){
+      const corners=[['O',-w/2+s,h/2-s],['A',w/2-s,h/2-s],['B',-w/2+s,-h/2+s],['C',w/2-s,-h/2+s]];
+      const controlPoints=[];
+      for(const [name,x,y] of corners){
+        const a=local(x,y,.032);box(a,[.042,.042,.042],C.board);controlPoints.push(a);
+        label(a,name,1,[x<0?-14:14,y>0?-10:20]);
+      }
+      const border=[local(-w/2-.04,h/2+.04,.035),local(w/2+.04,h/2+.04,.035),local(w/2+.04,-h/2-.04,.035),local(-w/2-.04,-h/2-.04,.035)];
+      for(let i=0;i<4;i++)line(border[i],border[(i+1)%4],C.board);
+      label(local(0,h/2+.27,0),'P'+(index+1)+' · surveyed board',0,[0,-14]);
+      if(state.survey){
+        const station=stationPosition();for(const point of controlPoints)dashed(station,point,C.survey);
+        dashed(cameras[state.cam].p,b.center,mix(C.bg,C.board,.75));
+      }
+    }else label(local(0,h/2+.12),'P'+(index+1),3,[0,-9]);
+  }
+  function stationPosition(){
+    const a=cameras[state.cam].yaw+1.6;return [4.7*Math.cos(a),4.7*Math.sin(a),1.65];
+  }
+  const controls=[[8.7,8.7,.04],[8.7,-8.7,.04],[-8.7,-8.7,.04],[-8.7,8.7,.04]];
+  function surveyStation(){
+    const C=colors,p=stationPosition(),base=[p[0],p[1],1.25];
+    for(let i=0;i<3;i++){
+      const a=i*2*Math.PI/3,foot=add([p[0],p[1],.02],[.53*Math.cos(a),.53*Math.sin(a),0]);
+      cylinder(foot,base,.029,mix(C.survey,C.car,.45),10);
+    }
+    box(add(p,[0,0,-.22]),[.44,.40,.08],C.survey);
+    box(add(p,[0,0,-.01]),[.30,.25,.32],C.survey);
+    cylinder(add(p,[-.19,0,0]),add(p,[.19,0,0]),.09,mix(C.dark,C.survey,.4),16);
+    label(add(p,[0,0,.33]),'Total station',2,[0,-12]);
+    controls.forEach((q,i)=>{
+      cylinder(q,add(q,[0,0,.22]),.035,C.survey,8);box(add(q,[0,0,.25]),[.16,.16,.16],C.survey);
+      if(state.view!=='setup')label(add(q,[0,0,.3]),'S'+(i+1),4,[0,-8]);
+      if(state.survey&&state.view!=='setup')dashed(p,add(q,[0,0,.25]),mix(C.survey,C.bg,.5));
+    });
+  }
+  function environment(){
+    scene={tri:[],lines:[]};labels=[];const C=colors;
+    quad([-12,-12,-.015],[12,-12,-.015],[12,12,-.015],[-12,12,-.015],mix(C.bg,C.fg,.035));
+    for(let n=-11;n<=11;n++){
+      line([n,-11,.002],[n,11,.002],mix(C.bg,C.fg,.075));line([-11,n,.002],[11,n,.002],mix(C.bg,C.fg,.075));
+    }
+    for(const r of [2,5,8,10]){
+      ring(r,mix(C.bg,C.fg,r===10?.28:.15));
+      if(state.view!=='setup')label([-.45,-r,.03],r+' m',5,[0,14]);
+    }
+    vehicle();surveyStation();
+    for(let i=0;i<6;i++)if(i!==state.placement&&state.ghosts)board(i,false);
+    board(state.placement,true);
+    if(state.ground)for(const r of [1.6,3.6,6.5,9.7])for(let i=0;i<16;i++){
+      const a=i*Math.PI/8,x=r*Math.cos(a),y=r*Math.sin(a);
+      if(x>-.95&&x<3.8&&Math.abs(y)<1.15)continue;
+      box([x,y,.014],[.16,.16,.018],C.check);box([x,y,.026],[.045,.045,.006],C.light);
+    }
+    const origin=[0,0,.04];
+    for(const [end,text] of [[[1.6,0,.04],'+X forward'],[[0,1.6,.04],'+Y left'],[[0,0,1.4],'+Z up']]){
+      arrow(origin,end,C.cam);label(end,text,2,[0,-10]);
+    }
+    label([0,0,.05],'Oᵥ · rear axle / ground',1,[0,25]);
+    if(state.view!=='setup'&&state.ground)label([-7.2,-3.4,.05],'Independent ground checks',4,[0,18]);
+    if(gl){gl.bindBuffer(gl.ARRAY_BUFFER,vbo);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(scene.tri),gl.STATIC_DRAW);gl.bindBuffer(gl.ARRAY_BUFFER,lineBuffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(scene.lines),gl.STATIC_DRAW);}
+    console.assert(scene.tri.every(Number.isFinite)&&scene.lines.every(Number.isFinite),'Finite scene geometry');
+    root.dataset.triangles=String(scene.tri.length/27);root.dataset.placements=String(state.ghosts?6:1);root.dataset.renderer=gl?'webgl':'software';
+  }
+  function lookAt(eye,target){
+    const z=norm(sub(eye,target)),x=norm(cross([0,0,1],z)),y=cross(z,x);
+    return [x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-dot(x,eye),-dot(y,eye),-dot(z,eye),1];
+  }
+  function matmul(a,b){const o=new Array(16).fill(0);for(let c=0;c<4;c++)for(let r=0;r<4;r++)for(let k=0;k<4;k++)o[c*4+r]+=a[k*4+r]*b[c*4+k];return o;}
+  function updateMatrix(){
+    const {theta,phi,distance,target}=orbit;
+    const eye=add(target,[distance*Math.cos(phi)*Math.cos(theta),distance*Math.cos(phi)*Math.sin(theta),distance*Math.sin(phi)]);
+    const f=1/Math.tan(Math.PI/7.3),aspect=width/height,near=.1,far=100;
+    const perspective=[f/aspect,0,0,0,0,f,0,0,0,0,(far+near)/(near-far),-1,0,0,2*far*near/(near-far),0];
+    matrix=matmul(perspective,lookAt(eye,target));
+  }
+  function project(p){
+    const a=[...p,1],o=[0,0,0,0];for(let i=0;i<4;i++)for(let k=0;k<4;k++)o[i]+=matrix[k*4+i]*a[k];
+    return {x:(o[0]/o[3]*.5+.5)*width,y:(.5-o[1]/o[3]*.5)*height,z:o[2]/o[3],front:o[3]>0};
+  }
+  function drawLabels(){
+    ctx.clearRect(0,0,width,height);
+    const size=Math.max(12,parseFloat(getComputedStyle(root).fontSize)||14);
+    ctx.font='500 '+size+'px '+getComputedStyle(root).fontFamily;ctx.textAlign='center';ctx.textBaseline='middle';
+    const placed=[];let count=0;
+    for(const item of [...labels].sort((a,b)=>a.priority-b.priority)){
+      if(width<420&&item.priority>2)continue;
+      const p=project(item.p);if(!p.front||p.z>1)continue;
+      const textWidth=ctx.measureText(item.text).width+10,x=clamp(p.x+item.offset[0],textWidth/2+4,width-textWidth/2-4),y=p.y+item.offset[1];
+      if(y<15||y>height-15)continue;
+      const box={l:x-textWidth/2,r:x+textWidth/2,t:y-10,b:y+10};
+      if(placed.some(b=>box.l<b.r+3&&box.r>b.l-3&&box.t<b.b+3&&box.b>b.t-3))continue;
+      placed.push(box);ctx.globalAlpha=.90;ctx.fillStyle=css(colors.bg);ctx.fillRect(box.l,box.t,textWidth,20);ctx.globalAlpha=1;
+      ctx.fillStyle=css(colors.fg);ctx.fillText(item.text,x,y);count++;
+    }
+    root.dataset.visibleLabels=String(count);
+  }
+  function softwareDraw(){
+    const draw=[];fallback.fillStyle=css(colors.bg);fallback.fillRect(0,0,width,height);
+    const light=norm([-.3,-.4,1]);
+    for(let i=0;i<scene.tri.length;i+=27){
+      const tri=[0,9,18].map(k=>project(scene.tri.slice(i+k,i+k+3)));if(tri.some(p=>!p.front))continue;
+      const n=scene.tri.slice(i+3,i+6),c=mul(scene.tri.slice(i+6,i+9),.67+.33*Math.max(0,dot(n,light)));
+      draw.push({tri,color:css(c),z:tri.reduce((v,p)=>v+p.z,0)/3});
+    }
+    draw.sort((a,b)=>b.z-a.z);for(const {tri,color} of draw){fallback.beginPath();tri.forEach((p,i)=>i?fallback.lineTo(p.x,p.y):fallback.moveTo(p.x,p.y));fallback.closePath();fallback.fillStyle=color;fallback.fill();}
+    for(let i=0;i<scene.lines.length;i+=18){const a=project(scene.lines.slice(i,i+3)),b=project(scene.lines.slice(i+9,i+12));if(!a.front||!b.front)continue;fallback.strokeStyle=css(scene.lines.slice(i+6,i+9));fallback.beginPath();fallback.moveTo(a.x,a.y);fallback.lineTo(b.x,b.y);fallback.stroke();}
+  }
+  function render(){
+    scheduled=false;updateMatrix();
+    if(gl){
+      gl.viewport(0,0,canvas.width,canvas.height);gl.clearColor(...colors.bg,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(program);gl.uniformMatrix4fv(locations.m,false,new Float32Array(matrix));
+      const bind=(buffer,flat)=>{gl.bindBuffer(gl.ARRAY_BUFFER,buffer);for(const [loc,off] of [[locations.p,0],[locations.n,12],[locations.c,24]]){gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,3,gl.FLOAT,false,36,off);}gl.uniform1f(locations.f,flat);};
+      gl.enable(gl.POLYGON_OFFSET_FILL);gl.polygonOffset(1,1);bind(vbo,0);gl.drawArrays(gl.TRIANGLES,0,scene.tri.length/9);gl.disable(gl.POLYGON_OFFSET_FILL);
+      bind(lineBuffer,1);gl.drawArrays(gl.LINES,0,scene.lines.length/9);
+    }else softwareDraw();
+    drawLabels();root.dataset.rendered='true';
+  }
+  function requestRender(){if(!scheduled){scheduled=true;requestAnimationFrame(render);}}
+  function resize(){
+    width=Math.max(1,canvas.clientWidth);height=canvas.clientHeight;const dpr=Math.min(devicePixelRatio||1,2);
+    for(const c of [canvas,overlay]){c.width=Math.round(width*dpr);c.height=Math.round(height*dpr);}
+    ctx.setTransform(dpr,0,0,dpr,0,0);if(fallback)fallback.setTransform(dpr,0,0,dpr,0,0);requestRender();
+  }
+  function preset(){
+    const cam=cameras[state.cam],target=boardPlacement(2).center;
+    if(state.view==='setup'){
+      orbit.target=[(target[0]+1.2)*.48,target[1]*.48,.65];orbit.distance=width<450?22:15;
+      orbit.theta=cam.yaw+2.3;orbit.phi=.65;
+    }else{orbit.target=[0,0,0];orbit.distance=width<450?38:29;orbit.theta=.80;orbit.phi=state.view==='top'?1.535:.75;}
+  }
+  function detail(){
+    $('detail').textContent=cameras[state.cam].id+' · P'+(state.placement+1)+' · Illustrative poses and board size; no measured FOV or visibility. '+(state.view==='setup'?'':'Rings: vehicle-origin range. ');
+    for(const [key,id] of [['cam','camera'],['placement','placement'],['view','view']])$(id).value=String(state[key]);
+    for(const key of ['survey','ground','ghosts'])$(key).checked=state[key];
+  }
+  function save(){
+    window.openai?.setWidgetState?.({modelContent:{camera:cameras[state.cam].id,placement:'P'+(state.placement+1),view:state.view},privateContent:{...state,orbit:{...orbit}}}).catch(()=>{});
+  }
+  function restore(saved){
+    const s=saved?.privateContent;if(!s||typeof s!=='object')return;
+    if(Number.isInteger(s.cam)&&s.cam>=0&&s.cam<6)state.cam=s.cam;
+    if(Number.isInteger(s.placement)&&s.placement>=0&&s.placement<6)state.placement=s.placement;
+    if(['setup','site','top'].includes(s.view))state.view=s.view;
+    for(const k of ['survey','ground','ghosts'])if(typeof s[k]==='boolean')state[k]=s[k];
+    preset();
+    if(s.orbit&&['theta','phi','distance'].every(k=>Number.isFinite(s.orbit[k]))&&Array.isArray(s.orbit.target)&&s.orbit.target.length===3&&s.orbit.target.every(Number.isFinite)){
+      orbit.theta=s.orbit.theta;orbit.phi=clamp(s.orbit.phi,.08,1.54);orbit.distance=clamp(s.orbit.distance,5,45);orbit.target=s.orbit.target.map(v=>clamp(v,-15,15));
+    }
+  }
+  function changed(reframe=false){if(reframe)preset();environment();detail();requestRender();save();}
+  $('camera').addEventListener('change',()=>{state.cam=Number($('camera').value);changed(true);});
+  $('placement').addEventListener('change',()=>{state.placement=Number($('placement').value);changed();});
+  $('view').addEventListener('change',()=>{state.view=$('view').value;changed(true);});
+  for(const key of ['survey','ground','ghosts'])$(key).addEventListener('change',()=>{state[key]=$(key).checked;changed();});
+  for(const b of root.querySelectorAll('[data-orbit]'))b.addEventListener('click',()=>{
+    const action=b.dataset.orbit;
+    if(action==='left')orbit.theta+=.22;if(action==='right')orbit.theta-=.22;
+    if(action==='up')orbit.phi=clamp(orbit.phi+.14,.08,1.54);if(action==='down')orbit.phi=clamp(orbit.phi-.14,.08,1.54);
+    if(action==='in')orbit.distance=clamp(orbit.distance*.83,5,45);if(action==='out')orbit.distance=clamp(orbit.distance*1.2,5,45);
+    requestRender();save();
+  });
+  let pointers=new Map(),lastDrag=null;
+  canvas.addEventListener('pointerdown',e=>{canvas.setPointerCapture(e.pointerId);pointers.set(e.pointerId,[e.clientX,e.clientY]);lastDrag={x:e.clientX,y:e.clientY};});
+  canvas.addEventListener('pointermove',e=>{
+    if(!pointers.has(e.pointerId))return;
+    const old=[...pointers.values()];pointers.set(e.pointerId,[e.clientX,e.clientY]);
+    if(pointers.size===2){const now=[...pointers.values()],a=Math.hypot(old[0][0]-old[1][0],old[0][1]-old[1][1]),b=Math.hypot(now[0][0]-now[1][0],now[0][1]-now[1][1]);if(b>2)orbit.distance=clamp(orbit.distance*a/b,5,45);}
+    else if(lastDrag){orbit.theta-=(e.clientX-lastDrag.x)*.008;orbit.phi=clamp(orbit.phi+(e.clientY-lastDrag.y)*.006,.08,1.54);}
+    lastDrag={x:e.clientX,y:e.clientY};requestRender();
+  });
+  const stop=e=>{pointers.delete(e.pointerId);lastDrag=null;save();};
+  canvas.addEventListener('pointerup',stop);canvas.addEventListener('pointercancel',stop);
+  canvas.addEventListener('wheel',e=>{e.preventDefault();orbit.distance=clamp(orbit.distance*Math.exp(e.deltaY*.0015),5,45);requestRender();},{passive:false});
+  canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();$('error').hidden=false;$('error').textContent='3D context interrupted. Reopen this scene to restore it.';});
+  const theme=new MutationObserver(()=>{refreshColors();environment();requestRender();});
+  theme.observe(document.documentElement,{attributes:true,attributeFilter:['class','style','data-theme']});
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{refreshColors();environment();requestRender();});
+  window.addEventListener('openai:set_globals',e=>{const s=e.detail?.globals?.widgetState;if(s){restore(s);environment();detail();requestRender();}});
+  // A compact geometry check catches frame/sign and projection regressions without a test framework.
+  console.assert(Math.abs(dot(norm(cross([0,0,1],[1,0,0])),[0,1,0])-1)<1e-8,'Vehicle left-axis convention');
+  console.assert(cameras.length===6&&[...Array(6).keys()].every(i=>boardPlacement(i).center.every(Number.isFinite)),'Six valid camera placements');
+  width=canvas.clientWidth||736;height=canvas.clientHeight||510;
+  refreshColors();preset();restore(window.openai?.widgetState);environment();detail();resize();new ResizeObserver(resize).observe(canvas.parentElement);
+})();
+</script>

@@ -1,0 +1,5 @@
+[project]
+name = "bevcal"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["numpy", "opencv-python>=4.10,<5"]
