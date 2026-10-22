@@ -1,0 +1,12 @@
+All 4 images (and sidecars) are byte-identical copies of one stale frame: ffmpeg CFR mode duplicated frames (fixed with -fps_mode passthrough). Not valid calibration views. Moved here 2026-10-22, not deleted (plan §8.4).
+
+25 images moved 2026-10-22: repeat saves of an already-kept pose (corners within 15 px); repeats add no information to intrinsics. Kept the first image of each pose:
+  CAM2_intrinsic-fit_20261022T160059_000.png
+  CAM2_intrinsic-fit_20261022T160122_003.png
+  CAM2_intrinsic-fit_20261022T160136_006.png
+  CAM2_intrinsic-fit_20261022T160207_009.png
+  CAM2_intrinsic-fit_20261022T160322_018.png
+  CAM2_intrinsic-fit_20261022T160344_022.png
+  CAM2_intrinsic-fit_20261022T160413_027.png
+
+Remaining 7 images moved 2026-10-22: operator chose to recapture all 30 fit poses at close range (earlier poses were far, mid-height only).

@@ -1,0 +1,22 @@
+{
+  "camera": "CAM2",
+  "device": "avfoundation:Global Shutter Camera",
+  "device_resolved": "/Users/barry/BEV_Cali/avfoundation:Global Shutter Camera",
+  "v4l2_info": [
+    "macOS AVFoundation via ffmpeg, native mode, one vehicle camera connected, identity operator-verified"
+  ],
+  "width": 1920,
+  "height": 1200,
+  "fourcc": "BGR",
+  "fps": 5,
+  "controls": null,
+  "kind": "intrinsic-fit",
+  "placement": null,
+  "spacing_m": [
+    0.074
+  ],
+  "session": "sessions/bench01",
+  "timestamp": "2026-10-22T16:16:51.270282-05:00",
+  "file": "CAM2_intrinsic-fit_20261022T161651_018.png",
+  "sha256": "fed0bfcd377fe330f928d1df9675147f59fabaaa4daac368a0dc95a38210e7b1"
+}

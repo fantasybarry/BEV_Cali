@@ -7,16 +7,26 @@ List auto-mode controls before the manual values they unlock (controls are appli
   python capture.py --cameras cameras.json --camera CAM2 --session sessions/S01 --kind intrinsic-fit --spacing 0.0741
   python capture.py ... --kind extrinsic --placement P03
 
+macOS bench mode (intrinsics only): frames come through ffmpeg, which only accepts the camera's native
+modes, so nothing is rescaled. Connect ONE vehicle camera, find its name with --list-mac, pass --mac-device.
+macOS cannot set UVC controls: exposure, white balance and focus stay automatic. Intrinsics from macOS are
+valid only for a fixed-focus or mechanically locked lens (§2.2).
+
 Keys: space = capture, q / Esc = quit. Images land in <session>/<camera>/<kind>/, each with a JSON sidecar.
 """
 import argparse
+import atexit
 import datetime
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+# macOS OpenCL crashes OpenCV (segfault loading its cached kernels); must be set before cv2 is imported
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 
 import cv2
 import numpy as np
@@ -70,12 +80,50 @@ def open_camera(cfg):
     return cap, fourcc
 
 
+def mac_devices():
+    """AVFoundation video device names, in ffmpeg's listing order."""
+    import imageio_ffmpeg
+    r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-f", "avfoundation",
+                        "-list_devices", "true", "-i", ""], capture_output=True, text=True)
+    video = r.stderr.split("video devices:")[-1].split("audio devices:")[0]
+    return [m.group(1) for m in re.finditer(r"\] \[\d+\] (.+)", video)]
+
+
+class MacCapture:
+    """ffmpeg AVFoundation frame source with a cv2.VideoCapture-style read(); frames are BGR bytes."""
+
+    def __init__(self, name, w, h, fps):
+        import imageio_ffmpeg
+        names = mac_devices()
+        if ":" in name or names.count(name) != 1:
+            sys.exit(f"--mac-device must name exactly one connected camera (one vehicle camera at a time); "
+                     f"connected: {names}")
+        self.n = w * h * 3
+        self.p = subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
+                                   "-f", "avfoundation", "-video_size", f"{w}x{h}", "-framerate", str(fps),
+                                   # passthrough: real camera frames only; the default pads with duplicates
+                                   "-i", f"{name}:none", "-fps_mode", "passthrough",
+                                   "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        atexit.register(self.p.kill)  # otherwise ffmpeg outlives us and keeps the camera open
+
+    def read(self):
+        data = self.p.stdout.read(self.n)
+        if len(data) == self.n:
+            return True, np.frombuffer(data, np.uint8)
+        self.p.kill()
+        # ffmpeg lists the camera's supported modes when the requested size or frame rate is not one of them
+        sys.exit("ffmpeg: " + self.p.stderr.read().decode(errors="replace").strip())
+
+
 def decode(raw, fourcc, w, h):
-    """Raw V4L2 buffer -> BGR image. Raises if the frame is not the configured size (§5)."""
+    """Raw frame buffer -> BGR image. Raises if the frame is not the configured size (§5)."""
     raw = np.asarray(raw, np.uint8).ravel()
     img = None
     if fourcc == "MJPG":
         img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+    elif fourcc == "BGR" and raw.size == w * h * 3:
+        img = raw.reshape(h, w, 3)
     elif raw.size == w * h * 2:
         img = cv2.cvtColor(raw.reshape(h, w, 2), cv2.COLOR_YUV2BGR_YUYV)
     if img is None or img.shape[:2] != (h, w):
@@ -91,15 +139,31 @@ def main():
     ap.add_argument("--kind", required=True, choices=list(KINDS))
     ap.add_argument("--placement", help="placement ID, required for extrinsic")
     ap.add_argument("--spacing", type=float, nargs="+", required=True, help="measured square spacing SX [SY], m")
+    ap.add_argument("--mac-device", help="macOS only: AVFoundation camera name (see --list-mac)")
+    ap.add_argument("--list-mac", action="store_true", help="macOS only: list connected camera names and exit")
+    if "--list-mac" in sys.argv:
+        print("\n".join(mac_devices()))
+        return
     a = ap.parse_args()
     if a.kind == "extrinsic" and not a.placement:
         ap.error("--placement is required for extrinsic captures")
 
     cfg = json.loads(Path(a.cameras).read_text())[a.camera]
     w, h = cfg["width"], cfg["height"]
-    cap, fourcc = open_camera(cfg)
-    dev = cfg["device"]
-    info = v4l2(dev, "--info").strip().splitlines()
+    mac = sys.platform == "darwin"
+    if mac:
+        if not a.mac_device:
+            ap.error("--mac-device is required on macOS (see --list-mac)")
+        print(f"macOS: UVC controls NOT applied ({', '.join(cfg['controls'])}); "
+              f"intrinsics are valid only if {a.camera}'s focus is fixed or locked (§2.2)")
+        fps = cfg.get("fps", 5)
+        cap, fourcc, dev = MacCapture(a.mac_device, w, h, fps), "BGR", f"avfoundation:{a.mac_device}"
+        info = ["macOS AVFoundation via ffmpeg, native mode, one vehicle camera connected, identity operator-verified"]
+    else:
+        cap, fourcc = open_camera(cfg)
+        dev = cfg["device"]
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        info = v4l2(dev, "--info").strip().splitlines()
     out = Path(a.session) / a.camera / a.kind
     out.mkdir(parents=True, exist_ok=True)
     n = len(list(out.glob("*.json")))
@@ -107,6 +171,7 @@ def main():
     s = min(1.0, PREVIEW_W / w)
     win = f"{a.camera} {a.kind}"
 
+    last = None  # preview corners of the last save
     while True:
         ok, raw = cap.read()
         if not ok:
@@ -118,21 +183,26 @@ def main():
             cv2.drawChessboardCorners(small, PATTERN, c, True)
         status = f"{a.camera} {a.kind} {a.placement or ''} saved {n}{f'/{target}' if target else ''}  " \
                  f"board {'7x10' if found else '--'}"
-        cv2.putText(small, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0) if found else (0, 0, 255), 2)
+        # repeats of one pose add nothing to intrinsics (extrinsic placements want repeats, §9)
+        same = a.kind.startswith("intrinsic") and found and last is not None and np.abs(c - last).mean() < 10
+        if same:
+            status += "  SAME POSE: move the board"
+        cv2.putText(small, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (0, 255, 0) if found and not same else (0, 0, 255), 2)
         cv2.imshow(win, small)
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
             break
-        if key != ord(" "):
+        if key != ord(" ") or same:
             continue
 
-        for _ in range(2):  # drop buffered frames so the saved image is what the camera sees now
-            cap.grab()
-        ok, raw = cap.retrieve()
-        if not ok:
-            sys.exit("frame read failed")
+        for _ in range(3):  # drop buffered frames so the saved image is what the camera sees now
+            ok, raw = cap.read()
+            if not ok:
+                sys.exit("frame read failed")
         img = decode(raw, fourcc, w, h)
-        controls = check_controls(dev, cfg["controls"])  # a USB reset silently restores auto modes
+        # a USB reset silently restores auto modes; macOS cannot read controls at all
+        controls = None if mac else check_controls(dev, cfg["controls"])
         data = np.asarray(raw, np.uint8).tobytes() if fourcc == "MJPG" else cv2.imencode(".png", img)[1].tobytes()
         stamp = datetime.datetime.now().astimezone()
         stem = f"{a.camera}_{a.kind}{'_' + a.placement if a.placement else ''}_{stamp:%Y%m%dT%H%M%S}_{n:03d}"
@@ -140,12 +210,13 @@ def main():
         with open(path, "xb") as fh:
             fh.write(data)
         meta = {"camera": a.camera, "device": dev, "device_resolved": os.path.realpath(dev), "v4l2_info": info,
-                "width": w, "height": h, "fourcc": fourcc, "fps": cap.get(cv2.CAP_PROP_FPS), "controls": controls,
+                "width": w, "height": h, "fourcc": fourcc, "fps": fps, "controls": controls,
                 "kind": a.kind, "placement": a.placement, "spacing_m": a.spacing, "session": a.session,
                 "timestamp": stamp.isoformat(), "file": path.name, "sha256": hashlib.sha256(data).hexdigest()}
         with open(out / f"{stem}.json", "x") as fh:
             json.dump(meta, fh, indent=2)
         n += 1
+        last = c if found else None
         print(f"saved {path}")
 
 

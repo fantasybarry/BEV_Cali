@@ -10,8 +10,12 @@ CLI:
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+# macOS OpenCL crashes OpenCV (segfault loading its cached kernels); must be set before cv2 is imported
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 
 import cv2
 import numpy as np

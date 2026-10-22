@@ -1,0 +1,88 @@
+{
+  "CAM1": {
+    "device": "/dev/v4l/by-path/REPLACE-port1-video-index0",
+    "width": 3264,
+    "height": 2448,
+    "fourcc": "MJPG",
+    "fps": 5,
+    "controls": {
+      "auto_exposure": 1,
+      "exposure_time_absolute": 100,
+      "white_balance_automatic": 0,
+      "white_balance_temperature": 4600
+    }
+  },
+  "CAM2": {
+    "device": "/dev/v4l/by-path/REPLACE-port2-video-index0",
+    "width": 1920,
+    "height": 1200,
+    "fourcc": "YUYV",
+    "fps": 5,
+    "controls": {
+      "auto_exposure": 1,
+      "exposure_time_absolute": 100,
+      "white_balance_automatic": 0,
+      "white_balance_temperature": 4600
+    }
+  },
+  "CAM3": {
+    "device": "/dev/v4l/by-path/REPLACE-port3-video-index0",
+    "width": 4656,
+    "height": 3496,
+    "fourcc": "MJPG",
+    "fps": 5,
+    "controls": {
+      "auto_exposure": 1,
+      "exposure_time_absolute": 100,
+      "white_balance_automatic": 0,
+      "white_balance_temperature": 4600,
+      "focus_automatic_continuous": 0,
+      "focus_absolute": 0
+    }
+  },
+  "CAM4": {
+    "device": "/dev/v4l/by-path/REPLACE-port4-video-index0",
+    "width": 4656,
+    "height": 3496,
+    "fourcc": "MJPG",
+    "fps": 5,
+    "controls": {
+      "auto_exposure": 1,
+      "exposure_time_absolute": 100,
+      "white_balance_automatic": 0,
+      "white_balance_temperature": 4600,
+      "focus_automatic_continuous": 0,
+      "focus_absolute": 0
+    }
+  },
+  "CAM5": {
+    "device": "/dev/v4l/by-path/REPLACE-port5-video-index0",
+    "width": 4656,
+    "height": 3496,
+    "fourcc": "MJPG",
+    "fps": 5,
+    "controls": {
+      "auto_exposure": 1,
+      "exposure_time_absolute": 100,
+      "white_balance_automatic": 0,
+      "white_balance_temperature": 4600,
+      "focus_automatic_continuous": 0,
+      "focus_absolute": 0
+    }
+  },
+  "CAM6": {
+    "device": "/dev/v4l/by-path/REPLACE-port6-video-index0",
+    "width": 4656,
+    "height": 3496,
+    "fourcc": "MJPG",
+    "fps": 5,
+    "controls": {
+      "auto_exposure": 1,
+      "exposure_time_absolute": 100,
+      "white_balance_automatic": 0,
+      "white_balance_temperature": 4600,
+      "focus_automatic_continuous": 0,
+      "focus_absolute": 0
+    }
+  }
+}
